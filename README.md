@@ -44,7 +44,7 @@ else
 fi
 ```
 
-For a project installation, place this repository at `<project>/.claude/skills/ue-code-simplifier/` instead. For manual installation, copy the root `SKILL.md` and the entire `references/` directory into that skill directory; retain the license and attribution files. Keep all relative paths intact.
+For a project installation, place this repository at `<project>/.claude/skills/ue-code-simplifier/` instead. For manual installation, copy the repository's files (excluding `.git`) into that skill directory, including `SKILL.md`, the entire `references/` directory, `VALIDATION.md`, `AUDIT-RESOLUTION.md`, and the license/attribution/provenance files. Keep all relative paths intact.
 
 Claude Code discovers skills in its personal and project skill directories and supports direct `/skill-name` invocation. See the [official Claude Code skills documentation](https://code.claude.com/docs/en/skills) for discovery, same-name precedence, and troubleshooting.
 
@@ -81,33 +81,35 @@ The report contains an issue overview, detailed findings citing rule numbers, an
 
 ```text
 ue-code-simplifier/
-├── SKILL.md
-├── README.md
-├── LICENSE
-├── NOTICE.md
-├── PROVENANCE.md
-├── .gitattributes
-├── .gitignore
-└── references/
-    ├── api_patterns.md
-    ├── common_issues.md
-    ├── cross_version_compat.md
-    ├── epic_coding_standard.md
-    ├── learnings.md
-    ├── performance_patterns.md
-    ├── safety_patterns.md
-    └── shipping_checklist.md
+|-- SKILL.md
+|-- README.md
+|-- VALIDATION.md
+|-- AUDIT-RESOLUTION.md
+|-- LICENSE
+|-- NOTICE.md
+|-- PROVENANCE.md
+|-- .gitattributes
+|-- .gitignore
+`-- references/
+    |-- api_patterns.md
+    |-- common_issues.md
+    |-- cross_version_compat.md
+    |-- epic_coding_standard.md
+    |-- learnings.md
+    |-- performance_patterns.md
+    |-- safety_patterns.md
+    `-- shipping_checklist.md
 ```
 
 ## Version Scope and Validation Limits
 
-This edition translates the source's UE 5.3-5.7 scope and UE 5.6 source observations. **No Unreal Engine compilation, editor execution, runtime test, performance benchmark, or FAB submission was performed for this extraction.** Historical confidence labels describe the original records; they do not certify this repository against each engine version.
+The initial English extraction preserved the source's historical examples. A technical correction on 2026-10-09 addressed 40 audit findings and reconciled all nine knowledge files, 25 rule IDs and 15 historical learning entries. See [AUDIT-RESOLUTION.md](AUDIT-RESOLUTION.md) for each disposition.
 
-Validation for the extraction covers skill frontmatter, required references, local links and anchors, English translation coverage, preservation of C++ example bodies apart from comments and display text, and a scan for credentials and private paths. It does not establish the correctness of every original technical claim.
+Selected declarations and implementations were inspected in installed UE 5.3.2, 5.4.4, 5.5.4, 5.6.1 and 5.7.4. Version-specific boundaries, official sources and source locations are documented in [VALIDATION.md](VALIDATION.md). These checks do not certify a consuming plugin against every configuration or fork.
 
-Some source examples and rules need context or contain inconsistencies. For example, the C5038 example already lists members in declaration order; the C2440 example mixes a class pointer with an actor soft-object pointer; and the delegate example uses an AddLambda call shaped like a member-function binding. The spatial-grid example still uses TMap despite the general rule discouraging it. Broad statements about GC ownership, Shipping assertions, editor loading phases, Blueprint evaluation, and compiler versions must be checked against the actual module, build configuration, and engine API. This translation retains the original examples rather than silently replacing their implementation.
+**No Unreal compilation/UHT, editor or game execution, performance benchmark, asset cooking, Hot Reload/Live Coding test, serialization runtime test, cross-platform build, or Fab submission was performed.** GCC probes checked standard C++ semantics and Clang separately preprocessed the compatibility macros against actual engine version headers; neither was a UE plugin build. This skill repository contains no Unreal build CI.
 
-Before applying changes, inspect your engine headers, verify the target platform/toolchain and current Epic/FAB requirements, and compile and test the consuming plugin in its supported configurations. The matrix in `cross_version_compat.md` is illustrative; this repository contains no Unreal build CI.
+Examples require their stated class/function/reflection and module context; they are not independently compiled plugins. Historical confidence labels describe the original records and are now accompanied by evidence-status notes. Before applying changes, verify the consuming engine and contract, build/test the supported targets, and check the full current product-specific Fab policy. Neither source inspection nor successful compilation establishes every runtime/performance/submission claim.
 
 ## Source and License
 

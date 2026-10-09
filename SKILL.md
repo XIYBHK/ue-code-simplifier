@@ -3,234 +3,135 @@ name: ue-code-simplifier
 description: Review and optimize existing Unreal Engine C++ plugin code. Use for UE/UE5/Unreal C++ code review, checking, optimization, refactoring, simplification, performance, quality, memory, GC, Tick, container selection, or FAB/Marketplace submission readiness. Also use for UE C++ performance problems (TMap, spatial queries, hot paths, frame rate), memory/GC/safety concerns (UPROPERTY, check/ensure, IsValid), compilation warnings (C5038, TInlineAllocator), and preparing .h/.cpp files for FAB/Marketplace submission. Do not use for writing new UE code from scratch, Blueprint-only tasks, HLSL/shaders, packaging/deployment troubleshooting, editor crash debugging, or project migration between UE versions.
 ---
 
-# UE C++ Plugin Review and Optimization Standard
+# UE C++ Plugin Review and Optimization
 
-Based on UE5 engine-source observations, Epic's coding standards, FAB/Marketplace submission guidance, and the original author's production experience. See [README.md](README.md#version-scope-and-validation-limits) for the limits of this translated edition.
+Review existing plugin code for structure, correctness, safety, measured performance, API quality, and release readiness. Use the actual project, engine version, target, module, and user request to establish whether a rule applies. The source-check scope and unperformed tests are documented in [VALIDATION.md](VALIDATION.md); [AUDIT-RESOLUTION.md](AUDIT-RESOLUTION.md) tracks the technical corrections to the translated edition.
 
 ## Core Principles
 
-- **Preserve functionality:** Change the implementation, not the logical result.
-- **Keep Blueprint interfaces stable:** Do not change UFUNCTION/UPROPERTY signatures unless explicitly requested.
-- **Focus on recent changes:** By default, review or optimize only code changed during the current session, unless the user explicitly requests a full review.
-- **Verify critically:** Check that every recommendation or proposed solution is effective and reasonable.
-- **Fix bugs with minimal changes:** Never add incidental refactoring to a bug fix.
+- Preserve functionality, observable ordering, ownership, failure behavior, and timing contracts. An implementation change is not equivalent merely because it compiles.
+- Keep Blueprint/public interfaces stable unless the user requests a change and the required migration is handled.
+- Focus on code changed during the current session by default; expand scope when explicitly requested.
+- Confirm evidence against actual declarations/configuration and current official policy. Historical confidence and a generic example are not proof for this project.
+- Fix bugs with minimal changes; avoid incidental refactoring and unmeasured performance promises.
 
 ## Avoid Excessive Simplification
 
-Exercise restraint when optimizing code. Do not make it harder to understand or extend:
-
-- **Prefer readability to brevity:** Explicit, clear code is better than clever, compact code.
-- **Do not introduce nested template metaprogramming** unless it provides a clearly measured performance benefit.
-- **Do not combine unrelated logic:** Each function should do one thing; do not merge functions merely to reduce their number.
-- **Keep meaningful abstractions:** If an intermediate class or function clarifies the structure, do not remove it just to eliminate a layer.
-- **Do not minimize line count:** Ten clear lines are better than three lines that require comments to explain them.
-- **Keep valuable comments:** Remove comments that state the obvious; retain comments explaining why and the reasoning behind domain decisions.
+Prefer clear explicit code over brevity. Keep meaningful abstractions and comments explaining decisions. Do not merge unrelated logic or introduce complex template machinery just to reduce line count. Preserve extensibility and compatibility unless a measured/user-requested change justifies the tradeoff.
 
 ## Task Routing
 
-Follow the user's intent and focus on the corresponding steps. **Read only the reference files listed for that task.** Unrelated references consume context without adding value.
+Read [references/learnings.md](references/learnings.md) first, including its evidence-status limitations. Load the focused references progressively; do not load every reference for an unrelated narrow task. For version claims, check [VALIDATION.md](VALIDATION.md) and the consuming engine's declarations/build definitions.
 
-Read [references/learnings.md](references/learnings.md) at the beginning of each task, as required by the learning protocol below. Then load the task-specific references progressively.
-
-| User intent | Focus | Task-specific references |
-|-------------|-------|--------------------------|
-| "Review this code" / "Code review" | Steps 1 through 5 | Load references sequentially as each step requires; do not read them all at once |
-| "Optimize performance" / "Too slow" | Step 3 | [performance_patterns.md](references/performance_patterns.md) |
-| "Prepare for release" / "Submit to Marketplace" | Steps 2 and 5 | [safety_patterns.md](references/safety_patterns.md), [shipping_checklist.md](references/shipping_checklist.md) |
-| "Simplify this code" / "Refactor" | Steps 1 and 4 | [api_patterns.md](references/api_patterns.md), [epic_coding_standard.md](references/epic_coding_standard.md) |
-| "Fix a bug" / "Compilation error" | Targeted fix | [common_issues.md](references/common_issues.md) |
-| "Blueprint API" / "UPROPERTY" | Step 4 | [api_patterns.md](references/api_patterns.md) |
-| "GC leak" / "Memory problem" | Step 2 | [safety_patterns.md](references/safety_patterns.md) |
-| "Cross-version compatibility" | Focused compatibility review | [cross_version_compat.md](references/cross_version_compat.md) |
-
-For a full review, read each reference when its step begins, complete that step, and only then load the next reference.
+| Intent | Focus | References |
+|--------|-------|------------|
+| Code review | Steps 1-5 as applicable | Read references when their step begins |
+| Performance / too slow | Step 3 | [performance](references/performance_patterns.md) |
+| Release / Marketplace | Steps 2 and 5 | [safety](references/safety_patterns.md), [shipping](references/shipping_checklist.md) |
+| Simplify / refactor | Steps 1 and 4 | [API](references/api_patterns.md), [conventions](references/epic_coding_standard.md) |
+| Bug / compiler error | Targeted fix | [common issues](references/common_issues.md) |
+| Blueprint API / UPROPERTY | Step 4 | [API](references/api_patterns.md) |
+| GC / ownership | Step 2 | [safety](references/safety_patterns.md) |
+| Version compatibility | Focused review | [compatibility](references/cross_version_compat.md) |
 
 ## Review Workflow
 
-### Step 1: Assess Structure
+### Step 1: Establish Context and Structure
 
-1. Module structure: Runtime/Editor separation and Public/Private separation.
-2. `.uplugin` and `Build.cs` configuration: LoadingPhase and declared dependencies.
-3. IWYU headers, alphabetical include order, and `.generated.h` last.
-4. Naming conventions: A/U/F/E/I/T prefixes.
+Determine the supported engine/patch, platform, target/configuration, module types, and public contracts before assigning severity. Review Runtime/Editor separation, Public/Private exposure, `.uplugin`/Build.cs dependencies and loading phases. Check specific includes, .cpp matching-header-first, reflected .h generated-include-last, and naming conventions. See [conventions](references/epic_coding_standard.md).
 
-See [references/epic_coding_standard.md](references/epic_coding_standard.md).
+### Step 2: Review Safety and Ownership
 
-### Step 2: Review Safety
+Check explicit runtime validation/fallback paths separately from optional assertions. Establish strong/weak ownership, reflected/reference-collector reachability, creation and teardown. `IsValid` is an object-flags check, not protection for freed memory. Distinguish Tick capability from initial enabled state, preserve timing, and invalidate cached references appropriately. Default UObject API work to the GameThread unless a specific supported API plus lifetime/synchronization evidence permits an exception. See [safety](references/safety_patterns.md).
 
-1. Assertion macros: `check` for development, `ensure` for runtime, and `verify` for expressions with side effects.
-2. GC safety: UPROPERTY annotations for containers containing UObject pointers, and UObject creation methods.
-3. Pointer safety: `IsValid()` instead of `!= nullptr`, and defensive programming.
-4. Tick management: Disable by default, cache references, and use FTickableGameObject where appropriate.
-5. Thread safety: Access UObjects only on the GameThread; do not access them inside ParallelFor.
+### Step 3: Review Measured Performance
 
-See [references/safety_patterns.md](references/safety_patterns.md).
-
-### Step 3: Review Performance
-
-1. Stats profiling: Wrap each subsystem's hot functions with `SCOPE_CYCLE_COUNTER`.
-2. ParallelFor: Include `TEXT("Name")` and MinBatchSize.
-3. Container selection: Use spatial-prime hashing for spatial grids; avoid TMap on hot paths.
-4. Hot paths: Reuse members instead of local allocations; use Memcpy instead of element-by-element copying where suitable.
-5. TInlineAllocator: Its TArray specialization is a different type and cannot be passed interchangeably by reference with default TArray.
-
-See [references/performance_patterns.md](references/performance_patterns.md).
+Use profiling suited to the configuration/workload. Legal ParallelFor overloads do not require explicit tuning parameters; choose batching/flags from evidence. Prevent shared scratch-buffer races, including reentrancy across frames. Choose containers and key hashes separately; TMap is a valid spatial candidate. Check capacity, element lifetime/copy/zero traits, ordering, callback side effects, and removal costs before optimizing. See [performance](references/performance_patterns.md).
 
 ### Step 4: Review API Quality
 
-1. UPROPERTY metadata: UIMin/UIMax, ForceUnits, and EditCondition.
-2. Delegate selection: Use Dynamic only when Blueprint exposure is required.
-3. Subsystem selection: WorldSubsystem versus GameInstanceSubsystem.
-4. API exports: MinimalAPI, selective exports, and full exports as progressively broader levels.
-5. BlueprintPure: Add `BlueprintPure = false` to expensive const functions.
-6. Custom log categories and console variables.
+Review editor metadata without treating it as runtime validation or completed localization. Choose delegates for reflection/serialization/Blueprint and lifetime needs; preserve other UFUNCTION uses. Select subsystem ownership from the actual World/GameInstance/local-player lifecycle. Match export symbols and C++ access to public contracts. Analyze actual Blueprint pure evaluation and any requested pin migration. Check log-category linkage and CVar thread/configuration needs. See [API](references/api_patterns.md).
 
-See [references/api_patterns.md](references/api_patterns.md).
+### Step 5: Review Release Evidence
 
-### Step 5: Validate Release Readiness
+Build the targets/configurations/platforms applicable to the module and declared support, and report what was actually tested. Check the current product-specific Fab policy; the reference is a non-exhaustive preflight. Select loading phases from dependencies/events, distinguish reload/reinstancing/World cleanup, and verify soft loading/cook/retention and serialization/config migrations. See [shipping](references/shipping_checklist.md) and [compatibility](references/cross_version_compat.md).
 
-1. Compile Editor, Game, and Shipping configurations.
-2. Perform the seven FAB/Marketplace readiness checks.
-3. Cross-platform support: No hard-coded paths or platform-specific headers.
-4. Module loading phases: Use PostEngineInit for Editor modules under the original rule set.
-5. Hot Reload safety: Do not cache Subsystem pointers or retain engine objects in static variables.
-6. Soft references: Use TSoftObjectPtr/TSoftClassPtr for large assets.
+## Report Format and Severity
 
-See [references/shipping_checklist.md](references/shipping_checklist.md).
-
-## Required Report Format
-
-Organize review results consistently:
+Report real problems separately from team-style suggestions, tuning hypotheses, and unverified assumptions. Assign P0 only for an established critical crash/data-loss/security/lifetime risk in its actual reachable context; Editor crashes can also be critical. P1 covers important defects or substantiated risks; P2 covers lower-impact improvements. A rule violation without its applicability/trigger is not enough to assign severity.
 
 ```text
-# [Filename] Review Report
-
-> Review scope / User request / Review basis
+# [Scope] Review Report
+> Request, engine/patch, module/target, evidence and verification limits
 
 ## Issue Overview
+| ID | Severity | Finding | Location | Applicable rule / other evidence |
+|----|----------|---------|----------|----------------------------------|
 
-| # | Severity | Issue | Location | Rule |
-|---|----------|-------|----------|------|
-(List every issue, one per row, in P0 -> P1 -> P2 order.)
+## Details
+- Observed problem and trigger
+- Evidence, version/configuration, and uncertainty
+- Minimal proposed fix preserving the relevant contract
+- Applicable rule number, or a separate specific basis if not in the table
 
-## Detailed Analysis
-
-### [P0-1] Issue Title
-**Location:** file:line
-**Problem:** Specific description
-**Fix:** Code example
-**Rule #N:** Corresponding rule name
-
-(Group by severity: all P0 issues first, then P1, then P2.)
-
-## Fix Priorities
-(Numbered list in the recommended order of implementation.)
+## Validation and Priorities
+- Checks actually run and results
+- Checks not run, remaining risks, and ordered fixes
 ```
 
-The overview table is mandatory so the user can see the full picture immediately. Each issue in the detailed analysis must cite a rule number from the 25-rule table below so recommendations can be traced to their basis.
+Use an overview table and trace findings to applicable rules/evidence. Do not force an unrelated rule number onto an issue outside the 25-item table. A compile pass does not certify runtime, Blueprint, performance, or submission behavior.
 
 ## 25-Rule Quick Reference
 
-Rules are ordered by severity for quick issue identification. Detailed explanations and examples are in the linked references.
+Numbers remain stable for existing reports. Priority depends on a real trigger and context, not solely on placement in this table.
 
-### P0: Must Fix (Crashes, Leaks, Data Loss)
-
-| # | Rule | Summary | Reference |
-|---|------|---------|-----------|
-| 1 | Required UPROPERTY | Annotate UObject pointer members and containers with UPROPERTY() so GC tracks them, including TMap/TSet | [GC](references/safety_patterns.md#gc) |
-| 2 | UObject creation | Use only NewObject/SpawnActor/CreateDefaultSubobject; never `new` | [GC](references/safety_patterns.md#gc) |
-| 3 | Assertion selection | checkf is removed in Shipping; use ensureMsgf on runtime paths | [Assertions](references/safety_patterns.md#assert) |
-| 4 | Side effects in check | Expressions inside check do not execute in Shipping | [Assertions](references/safety_patterns.md#assert) |
-| 5 | IsValid() | Use IsValid() instead of a nullptr check for UObjects; the source notes PendingKill deprecation in UE 5.4+ | [GC](references/safety_patterns.md#gc) |
-
-### P1: Important (Performance, Maintainability)
-
-| # | Rule | Summary | Reference |
-|---|------|---------|-----------|
-| 6 | Stats profiling | Subsystem hot functions require SCOPE_CYCLE_COUNTER | [Stats](references/performance_patterns.md#stats) |
-| 7 | ParallelFor signature | Include TEXT("Name") and MinBatchSize | [ParallelFor](references/performance_patterns.md#parallelfor) |
-| 8 | Disable Tick by default | Set bCanEverTick = false; cache references in BeginPlay | [Tick](references/safety_patterns.md#tick) |
-| 9 | Hot-path heap allocation | Reuse members instead of allocating TArrays every frame | [Hot paths](references/performance_patterns.md#hotpath) |
-| 10 | TInlineAllocator | It creates a different TArray type; references are not interchangeable | [ParallelFor](references/performance_patterns.md#parallelfor) |
-| 11 | Delegate selection | Avoid Dynamic when Blueprint exposure is unnecessary | [Delegates](references/api_patterns.md#delegate) |
-| 12 | Custom log categories | Do not use LogTemp for every log | [Logging](references/api_patterns.md#log) |
-| 13 | Defensive programming | Expose unexpected null pointers with check; do not silently skip them | [Defensive programming](references/safety_patterns.md#defensive) |
-| 14 | Array safety | Call IsValidIndex() before indexing | [Defensive programming](references/safety_patterns.md#defensive) |
-| 15 | Container selection | Use spatial-prime hashing rather than TMap for spatial grids under the original rule set | [Containers](references/performance_patterns.md#container) |
-| 16 | API exports | Default to no exports; broaden as needed through MinimalAPI, selective, and full exports | [Exports](references/api_patterns.md#export) |
-| 17 | BlueprintPure | Add BlueprintPure = false to expensive const functions | [BlueprintPure](references/api_patterns.md#blueprintpure) |
-
-### P2: Improvements (Editor Experience, Code Quality)
-
-| # | Rule | Summary | Reference |
-|---|------|---------|-----------|
-| 18 | UPROPERTY UIMin/UIMax | Provide slider ranges for numeric properties | [UPROPERTY](references/api_patterns.md#uproperty) |
-| 19 | ForceUnits | Show units for distance, speed, and time properties | [UPROPERTY](references/api_patterns.md#uproperty) |
-| 20 | EditCondition | Conditionally display child properties controlled by a bool | [UPROPERTY](references/api_patterns.md#uproperty) |
-| 21 | Subsystem selection | Use WorldSubsystem instead of an Actor singleton | [Subsystems](references/api_patterns.md#subsystem) |
-| 22 | CVar debugging parameters | Use TAutoConsoleVariable for runtime-tunable parameters | [CVars](references/api_patterns.md#cvar) |
-| 23 | Include order | Alphabetical order; .generated.h last | [Includes](references/shipping_checklist.md#include) |
-| 24 | Soft references | Use TSoftObjectPtr for large assets to avoid loading chains | [Soft references](references/shipping_checklist.md#softref) |
-| 25 | Redundant factories | Return {} when the result is identical to default construction | [Hot paths](references/performance_patterns.md#hotpath) |
+| # | Review rule | Applicability / limit | Reference |
+|---|-------------|-----------------------|-----------|
+| 1 | GC ownership | Reflected strong fields need a reachable reference chain; valid collector/strong/weak alternatives exist | [GC](references/safety_patterns.md#gc) |
+| 2 | UObject creation | Use the appropriate construction/spawn/loading API; no ordinary new/delete UObject lifetime | [GC](references/safety_patterns.md#gc) |
+| 3 | Runtime error handling | Explicit validation/fallback in every required target; ensure is optional diagnostic, not a Shipping logging guarantee | [Assertions](references/safety_patterns.md#assert) |
+| 4 | Required side effects | Keep required work out of check/optional preprocessor paths; verify executes its expression but does not recover | [Assertions](references/safety_patterns.md#assert) |
+| 5 | UObject validity | IsValid checks flags/null within a valid lifetime; not for generic pointers or already-freed memory | [GC](references/safety_patterns.md#gc) |
+| 6 | Profiling | Measure meaningful scopes with appropriate Stats/trace configuration; no mandatory macro everywhere | [Stats](references/performance_patterns.md#stats) |
+| 7 | ParallelFor | Legal simple/named overloads; tune batch/flags only when workload and latency justify them | [ParallelFor](references/performance_patterns.md#parallelfor) |
+| 8 | Tick | Separate can-ever-tick from starts-enabled; changes to frequency/caches must preserve contracts | [Tick](references/safety_patterns.md#tick) |
+| 9 | Scratch allocation | Reuse only at the right reset boundary with exclusive/per-task/partitioned ownership | [Hot paths](references/performance_patterns.md#hotpath) |
+| 10 | TInlineAllocator | Allocator specializations are distinct types; mutable references are not interchangeable | [ParallelFor](references/performance_patterns.md#parallelfor) |
+| 11 | Delegates | Select for reflection/serialization/Blueprint and lifetime; use actual binding APIs | [Delegates](references/api_patterns.md#delegate) |
+| 12 | Logging | Useful module categories with deliberate cross-DLL exports and target logging configuration | [Logging](references/api_patterns.md#log) |
+| 13 | Null/error paths | Expected absence versus invariant violation; diagnose and retain required failure control flow | [Defensive](references/safety_patterns.md#defensive) |
+| 14 | Array access | Prove/check indices and element lifetime; guard does not solve concurrent structural mutation | [Defensive](references/safety_patterns.md#defensive) |
+| 15 | Containers/hashes | Choose from actual density/access/memory needs; TMap and custom hashing can coexist | [Containers](references/performance_patterns.md#container) |
+| 16 | Exports | Match needed symbols, visibility and ABI; MinimalAPI is not merely Cast and does not change access control | [Exports](references/api_patterns.md#export) |
+| 17 | BlueprintPure | Const auto-pure has conditions; inspect graph execution and preserve/migrate existing pins deliberately | [Pure](references/api_patterns.md#blueprintpure) |
+| 18 | Numeric UI ranges | Optional editor ranges matched to business/sentinel semantics; not runtime serialization enforcement | [Metadata](references/api_patterns.md#uproperty) |
+| 19 | Units | Useful display metadata; actual calculation/conversion still needs validation | [Metadata](references/api_patterns.md#uproperty) |
+| 20 | Edit conditions | EditCondition normally enables/disables; Hides requests hiding | [Metadata](references/api_patterns.md#uproperty) |
+| 21 | Subsystems | Select owner/world types and lifetime; UWorld is not each streamed Level or a guaranteed process singleton | [Subsystems](references/api_patterns.md#subsystem) |
+| 22 | CVars | Suitable debug/tuning configuration with correct thread access; not universal replacement for UPROPERTY settings | [CVars](references/api_patterns.md#cvar) |
+| 23 | Includes | .cpp matching header first; generated include last in its reflected .h; specific IWYU dependencies | [Includes](references/shipping_checklist.md#include) |
+| 24 | Asset references | Soft versus hard by contract; class/object types, load/retain/cook/failure paths must be correct | [Soft refs](references/shipping_checklist.md#softref) |
+| 25 | Default-equivalent factories | Prove all defaults/side effects equivalent; retain public API unless migration is requested | [Hot paths](references/performance_patterns.md#hotpath) |
 
 ## Learning Protocol
 
-This skill supports continued learning. After each review or optimization task, record new findings in [references/learnings.md](references/learnings.md) so knowledge can accumulate across sessions.
+Read [learnings](references/learnings.md) at task start and apply only relevant, qualified rules. Historical confidence labels are inherited, not new test certificates.
 
-### Before a Task
+After a reusable UE-specific compiler/UHT/linker/platform or type-system problem is fixed, present the anonymized observation, evidence/version, reusable conditional rule and category, and ask whether to add it. After confirmation, append it without private project names/paths. Ordinary typos and missing semicolons usually do not merit a record.
 
-1. Read `references/learnings.md` and apply relevant high-confidence entries.
-2. Check for historical entries in categories relevant to the current task.
+After other review/optimization work, record reusable findings with actual evidence, conditions and test limits when authorized within the task. Do not duplicate existing rules or promote an assumption into a fact. Do not treat read-only/audit-only work as authorization to edit learning records.
 
-### Capture Compilation Errors
-
-After a UE C++ compilation failure has been fixed:
-
-1. Determine whether the error is worth recording. Any one of these conditions is sufficient:
-   - UE-specific errors: UHT, reflection, module linking, or platform differences.
-   - The fix required more than one attempt.
-   - Implicit UE API behavior or version differences were involved.
-   - A type-system trap was involved, such as incompatible TInlineAllocator types or untracked GC references caused by missing UPROPERTY.
-2. If worth recording, show the distilled rule and ask the user:
-
-   ```text
-   Reusable compilation lesson found:
-   - Observation: [Anonymized error description]
-   - Rule: [One reusable sentence]
-   - Category: [compilation / ue-api / ...]
-   Add this to the skill's learning record?
-   ```
-
-3. After confirmation, anonymize the entry and append it to `references/learnings.md`.
-4. Skip low-value errors such as simple typos, missing semicolons, and ordinary missing includes.
-
-### After a Task
-
-1. Review the problems and discoveries from the task.
-2. Select new knowledge that is **reusable and independent of the project**, excluding private information such as project names and paths.
-3. Append entries using the required format.
-4. Skip any rule already covered by an existing reference; do not duplicate it.
-
-### Promotion
-
-Promote a learning entry into a formal rule when it has `high` confidence and has been validated in at least two distinct scenarios. Add it to the corresponding reference and mark the original entry `[Promoted]`.
-
-### Maintenance
-
-- When there are more than 50 entries, review and remove outdated or already-promoted entries.
-- Keep entries specific and actionable; reject vague descriptions.
-
-See [references/learnings.md](references/learnings.md) for categories and formatting.
+Promote a high-confidence entry only after validation in at least two distinct relevant scenarios, recording those scenarios and resolving conflicting rules. When records grow beyond 50 entries, review outdated/promoted material. Keep specific actionable conditions and distinguish source inspection from compilation/runtime/performance results.
 
 ## Reference Navigation
 
-| File | Contents | When to read |
-|------|----------|--------------|
-| [performance_patterns.md](references/performance_patterns.md) | Stats, ParallelFor, containers, spatial hashing, hot paths | Performance review (Step 3) |
-| [safety_patterns.md](references/safety_patterns.md) | Assertions, GC, Tick, defensive programming, IsValid, Shipping | Safety review (Step 2) |
-| [api_patterns.md](references/api_patterns.md) | UPROPERTY metadata, delegates, subsystems, exports, CVars, logs, BlueprintPure | API review (Step 4) |
-| [shipping_checklist.md](references/shipping_checklist.md) | FAB, cross-platform support, loading phases, Hot Reload, soft references, serialization, includes | Release validation (Step 5) |
-| [epic_coding_standard.md](references/epic_coding_standard.md) | Naming, types, headers, Blueprint exposure | Structural assessment (Step 1) |
-| [common_issues.md](references/common_issues.md) | Compilation warnings, TInlineAllocator, spatial data structures, reflection, thread safety | Bug fixes |
-| [cross_version_compat.md](references/cross_version_compat.md) | UE 5.3-5.7 compatibility notes | Cross-version work |
-| [learnings.md](references/learnings.md) | Accumulated learning records and promotion protocol | At the beginning of every task |
+| File | Contents |
+|------|----------|
+| [performance](references/performance_patterns.md) | Profiling, parallel ownership, containers, copy/zero/removal semantics |
+| [safety](references/safety_patterns.md) | Assertions, GC, lifetime, Tick, error paths and threads |
+| [API](references/api_patterns.md) | Metadata, delegates, subsystem owners, exports, logs, CVars, pure evaluation |
+| [shipping](references/shipping_checklist.md) | Product preflight, platform guards, loading, reload, assets, serialization |
+| [conventions](references/epic_coding_standard.md) | Naming, headers, type selection, localization and interface conventions |
+| [common issues](references/common_issues.md) | Diagnostic examples with explicit contexts and valid fixes |
+| [compatibility](references/cross_version_compat.md) | Qualified UE5.3-5.7 declarations, versions and toolchains |
+| [learnings](references/learnings.md) | Historical records with corrected rules/evidence status |

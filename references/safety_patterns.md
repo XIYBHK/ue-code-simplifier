@@ -1,187 +1,185 @@
 # Safety Patterns
 
-> Sources cited by the original skill: UE source `AssertionMacros.h`, MrRobinOfficial's GC chapter, and Tom Looman's defensive programming guidance.
+Sources: [Epic Asserts (5.3)](https://dev.epicgames.com/documentation/en-us/unreal-engine/asserts-in-unreal-engine?application_version=5.3), [UObject Handling (5.3)](https://dev.epicgames.com/documentation/en-us/unreal-engine/unreal-object-handling-in-unreal-engine?application_version=5.3), and [Object Pointers (5.6)](https://dev.epicgames.com/documentation/en-us/unreal-engine/object-pointers-in-unreal-engine?application_version=5.6). The original skill also credits Tom Looman and MrRobinOfficial's GC guidance. See [validation scope](../VALIDATION.md) for the local engine versions inspected.
+
+Examples are fragments for the stated context, not independently compiled plugins. Supply actual class declarations, includes, module dependencies, and project error-handling contracts.
 
 <a id="assert"></a>
 ## Assertion Macro Selection
 
-> Source: UE source `AssertionMacros.h`, lines 351-374 in the source edition consulted by the author.
+| Macro | Default Shipping game behavior | Purpose |
+|-------|--------------------------------|---------|
+| `check` / `checkf` | Diagnostic disabled; do not rely on expression execution or put required side effects here | Development invariants |
+| `ensure` / `ensureMsgf` | Expression evaluated and boolean result returned; diagnostic reporting disabled by default | Nonfatal development diagnostics alongside explicit error handling |
+| `verify` / `verifyf` | Expression evaluated; diagnostic disabled by default | An operation that must execute even without checks |
 
-| Macro | Shipping behavior in the source notes | Use | Example |
-|-------|--------------------------------------|-----|---------|
-| `check(expr)` | **Removed; not evaluated** | Programming errors that should never occur | `check(Index >= 0)` |
-| `checkf(expr,fmt)` | **Removed; not evaluated** | Same, with a message | `checkf(Ptr, TEXT("Null"))` |
-| `ensure(expr)` | Evaluated; failure logs only | Recoverable errors and telemetry | `if (ensure(Obj)) { ... }` |
-| `ensureMsgf(expr,fmt)` | Evaluated; failure includes a message | Same, with context | `ensureMsgf(SOA, TEXT("SOA null"))` |
-| `verify(expr)` | **Expression always evaluated** | Assertions with side effects | `verify(Init())` |
+These defaults are not unconditional promises: `USE_CHECKS_IN_SHIPPING`, `USE_ENSURES_IN_SHIPPING`, target type, and build configuration can change them. Shipping Editor is not the same target as a Shipping game. In configurations with reporting enabled, ordinary `ensure` variants generally report once per call site; `ensureAlways` variants request repeated reporting, subject to platform/reporting configuration.
 
-**Key rules:**
+An assertion does not provide recovery. External input must have real validation and a defined failure path. Required operations must not be hidden inside `check`, `#if !UE_BUILD_SHIPPING`, or another optional diagnostic path. If production telemetry is required, configure and verify it separately; do not assume an `ensure` is a Shipping log.
 
-- [BAD] `checkf` for runtime input validation: Shipping may crash or skip the check.
-- [BAD] Expressions with side effects inside `check()`: they do not execute in Shipping.
-- [BAD] `check` for external inputs such as user data, files, or network data: use `ensure` plus error handling.
+```cpp
+// Function-body fragment: preserve the failure path in every configuration.
+if (!IsValid(Target))
+{
+    ensureMsgf(false, TEXT("Expected a valid Target"));
+    return; // Or return an error / execute the documented fallback.
+}
+// Perform the intended operation on Target here.
+```
+
+Use `check` for an invariant established by program logic, without side effects. Use explicit handling for user data, files, network data, or legitimately absent objects. `verify(Init())` executes `Init()` when checks are disabled, but does not handle a failed return value for you.
 
 <a id="gc"></a>
-## GC Safety
+## GC Safety and Ownership
 
-> Sources: MrRobinOfficial/Guide-UnrealEngine, GC chapter; Epic documentation.
+### UObject Creation
 
-### UObject Creation: Three Methods
+Common application APIs are `CreateDefaultSubobject` for default subobjects in construction, `NewObject` for suitable runtime UObjects, and `UWorld::SpawnActor` for actors. Do not use ordinary `new` / `delete` for UObject lifetime. These three APIs are common choices, not an exhaustive list of engine-internal allocation or loading mechanisms.
 
 ```cpp
-// [OK] Inside the constructor
+// Separate fragments; the surrounding class and ownership are project-specific.
+// UObject/Actor constructor: retain the component in an appropriate reflected field.
 MyComp = CreateDefaultSubobject<UMyComponent>(TEXT("MyComp"));
 
-// [OK] Create a UObject at runtime
-UMyObject* Obj = NewObject<UMyObject>(this);
+// Runtime UObject creation: Outer alone is not a universal GC ownership guarantee.
+UMyObject* Object = NewObject<UMyObject>(this);
+// Establish the required strong reference before it outlives this operation.
 
-// [OK] Spawn an Actor at runtime
-AMyActor* Actor = GetWorld()->SpawnActor<AMyActor>(SpawnClass, SpawnTransform);
-
-// [BAD] Never do this
-UMyObject* Obj = new UMyObject();  // Not tracked by GC; leaks under the source rule
+// Actor method: SpawnClass must be compatible with AMyActor.
+if (UWorld* World = GetWorld())
+{
+    AMyActor* Actor = World->SpawnActor<AMyActor>(SpawnClass, SpawnTransform);
+    // Handle a null result; spawning can fail.
+}
 ```
 
-### UPROPERTY as the GC Tracking Entry Point
+### Reflected Strong References
 
-> Original engine-source observation: `UnrealTypePrivate.h`; UMapProperty and USetProperty implement `AddReferencedObjects`.
-
-**With UPROPERTY, GC tracks references in all these containers:**
+In a reachable reflected UObject or a reflected struct reached through its owner, `UPROPERTY` object fields and supported containers participate in reference collection. Prefer `TObjectPtr` for strong reflected UE5 fields where supported. Unreflected raw fields do not acquire this protection automatically.
 
 ```cpp
+// Member declarations inside a reflected class; distinct names are intentional.
 UPROPERTY()
-TArray<UObject*> Tracked;           // [OK] Tracked by GC
-
-UPROPERTY()
-TMap<int32, UObject*> AlsoTracked;  // [OK] UE5 UMapProperty supports tracking
+TArray<TObjectPtr<UObject>> TrackedObjects;
 
 UPROPERTY()
-TSet<UObject*> AlsoTracked;         // [OK] UE5 USetProperty supports tracking
+TMap<int32, TObjectPtr<UObject>> ObjectsById;
+
+UPROPERTY()
+TSet<TObjectPtr<UObject>> UniqueObjects;
 ```
 
-**Without UPROPERTY, none of these containers is tracked under this rule:**
+The owner and the entire reflection/reference chain must be reachable. Adding a macro to an arbitrary ordinary C++ struct does not create that chain. Non-reflected owners can deliberately collect references through `FGCObject` / `AddReferencedObjects`, or use an appropriate `TStrongObjectPtr`; weak observation uses `TWeakObjectPtr`. Select ownership first, then the mechanism.
 
-```cpp
-TArray<UObject*> NotTracked;        // [BAD] Missing UPROPERTY: not tracked by GC
-TMap<int32, UObject*> NotTracked;   // [BAD] Same
-```
+The modern source evidence for container contents is `FMapProperty::EmitReferenceInfo` and `FSetProperty::EmitReferenceInfo` in `GarbageCollection.cpp`. Legacy `UMapProperty/USetProperty::AddReferencedObjects` collects property descriptors; it is not evidence of traversal of a container's object values.
 
-The key issue is **missing UPROPERTY**, not the container type.
+### IsValid and Object Lifetime
 
-### IsValid() Versus nullptr
+`IsValid(UObject*)` tests null and object validity flags. It cannot safely inspect memory that was already freed, keep an object alive, or make an API thread-safe. Establish a valid reference/lifetime strategy before checking it. For weak references, resolve or pin them with the appropriate API for the engine version and use the result within the required lifetime and thread constraints.
 
-> Original engine-source observation: `ObjectMacros.h:591`; the source notes PendingKill deprecation in UE 5.4 and replacement with garbage elimination.
+`IsPendingKill()` already carries a UE 5.0 deprecation marker in the inspected UE 5.3 source; this is not a change that begins in 5.4. Use current object-validity APIs appropriate to your version. Do not replace null checks on non-UObject pointers, structs, or platform handles with UObject `IsValid`.
 
-```cpp
-// [BAD] Checks only null; the object may already be marked as garbage
-if (MyActor != nullptr) { ... }
+### Ownership Quick Reference
 
-// [OK] Checks both null and garbage state
-if (IsValid(MyActor)) { ... }
-```
+| Need | Typical mechanism | Constraint |
+|------|-------------------|------------|
+| Strong reflected UObject field | `UPROPERTY() TObjectPtr<T>` | Reachable reflected owner; supported field type |
+| Non-owning UObject observation | `TWeakObjectPtr<T>` | Resolve safely; not a strong GC owner |
+| Asset/class path loaded on demand | `TSoftObjectPtr<T>` / `TSoftClassPtr<T>` | Explicit loading, loaded-object retention, and cook policy |
+| Strong UObject reference outside reflection | Reference collector or suitable `TStrongObjectPtr<T>` | Follow version-specific lifetime/thread rules |
+| Shared non-UObject ownership | `TSharedPtr<T>` / `MakeShared<T>()` | Break unwanted reference-counting cycles with weak edges |
+| Exclusive non-UObject ownership | `TUniquePtr<T>` / `MakeUnique<T>()` | Complete type where deletion/construction requires it |
 
-The original guidance replaces deprecated `IsPendingKill()` with `IsValid()` in UE 5.4+.
+UObject GC uses reachability, not `TSharedPtr` reference counting. An unreachable UObject cycle can be collected; a cycle alone does not prove a leak. Trace roots and external referencers before changing strong references to weak ones. A weak edge must match the intended ownership, not merely make a diagram acyclic.
 
-### Memory Management Quick Reference
-
-| Scenario | Use |
-|----------|-----|
-| UObject member reference | `UPROPERTY() TObjectPtr<T>` in UE5 |
-| Weak UObject reference | `TWeakObjectPtr<T>` |
-| Lazily loaded asset | `TSoftObjectPtr<T>` |
-| Shared non-UObject ownership | `TSharedPtr<T>` / `MakeShared<T>()` |
-| Exclusive non-UObject ownership | `TUniquePtr<T>` / `MakeUnique<T>()` |
-| Circular references | Use `TWeakObjectPtr` / `TWeakPtr` on one side |
-
-**Key rules:**
-
-- Annotate UObject pointer members with `UPROPERTY()` so GC tracks them.
-- `TUniquePtr<T>` members require a complete type definition through a header include under the source's rule.
-- `TSharedPtr<T>` members may use a forward declaration.
+An owning `TUniquePtr<T>` can be declared with a forward-declared type when the operations requiring completeness, particularly destruction with the default deleter, are defined after the complete type is available. Out-of-line owner constructors/destructors are a common PImpl arrangement. Custom deleters may have different requirements. A declaration is not proof that every inline operation is safe.
 
 <a id="tick"></a>
 ## Tick Management
 
-> Sources: MrRobinOfficial best_practices; unreal-engine-cpp-pro.
+### Tick Capability versus Initial State
 
-### Disable Tick by Default
+The inspected base `AActor` constructor sets `bCanEverTick=false` and `bStartWithTickEnabled=true`. Derived classes, components, and Blueprint defaults may differ; inspect the actual type. `SetActorTickEnabled` requires `bCanEverTick` to be true and the actor not to be a template object.
 
 ```cpp
-// Actor constructor
+// Constructor of an actor that will never tick.
 PrimaryActorTick.bCanEverTick = false;
-PrimaryActorTick.bStartWithTickEnabled = false;
-
-// Component constructor
-PrimaryComponentTick.bCanEverTick = false;
-PrimaryComponentTick.bStartWithTickEnabled = false;
 ```
-
-### Optimize Necessary Tick Work
 
 ```cpp
-PrimaryActorTick.TickInterval = 0.2f;  // 5 Hz instead of 60 Hz
-SetActorTickEnabled(true);   // Enable on demand
-SetActorTickEnabled(false);  // Disable on demand
+// Alternative constructor setup for an actor that ticks on demand.
+// Do not combine this with the "never tick" choice above.
+PrimaryActorTick.bCanEverTick = true;
+PrimaryActorTick.bStartWithTickEnabled = false;
 ```
+
+```cpp
+// Actor method after an appropriate tick function has been registered.
+SetActorTickEnabled(true);
+// ... later, when work is no longer needed ...
+SetActorTickEnabled(false);
+```
+
+Reducing frequency with `TickInterval` changes latency, timing, and potentially simulation behavior. Do so only if the function's contract permits it, and handle elapsed time correctly. Caching `Cast`/component results can help a measured hot path, but cached references need invalidation or safe re-resolution when components, worlds, or instances change. A cast inside Tick is not automatically a defect.
 
 ### Tick Outside Actors and Components
 
 ```cpp
-class FMySystem : public FTickableGameObject {
+// Ordinary C++ class fragment. Define Tick in a source file and arrange ownership.
+class FMySystem : public FTickableGameObject
+{
+public:
     void Tick(float DeltaTime) override;
-    TStatId GetStatId() const override {
+    TStatId GetStatId() const override
+    {
         RETURN_QUICK_DECLARE_CYCLE_STAT(FMySystem, STATGROUP_Tickables);
     }
 };
 ```
 
-**Review rules:**
-
-- [BAD] Leaving bCanEverTick at its default true value.
-- [BAD] `Cast<T>()` inside Tick: cache references in BeginPlay.
-- [BAD] `FindComponentByClass<T>()` inside Tick.
+Choose `FTickableGameObject` only when its ownership and tick behavior fit. Review editor/paused-world behavior, `IsTickable`, teardown, and the relevant includes; it is not a universal replacement for Actor/Component Tick.
 
 <a id="defensive"></a>
 ## Defensive Programming
 
-> Source: Tom Looman, "Defensive Programming".
-
-### When to Check nullptr
-
-- [OK] Check a pointer **expected to be nullable**, such as `GetFocusedActor()` when no target exists.
-- [BAD] Silently skip a pointer **that should not be null**, such as `GetPlayerController()` when runtime logic requires it to exist.
+Distinguish expected absence from violated invariants. A player controller can legitimately be unavailable during startup/teardown or in a dedicated-server context. An unexpected absence should be diagnosed, but still handled in Shipping.
 
 ```cpp
-// [BAD] Silently swallow an unexpected null pointer
-APlayerController* PC = GetWorld()->GetPlayerController(0);
-if (PC) {
-    PC->AddToInventory(NewItem);  // Skipping loses the item without notice
+// Function-body fragment inside an Actor, on the GameThread.
+UWorld* World = GetWorld();
+if (!World)
+{
+    return; // Choose the documented missing-world behavior.
 }
 
-// [OK] Expose unexpected null pointers with check/ensure
-APlayerController* PC = GetWorld()->GetPlayerController(0);
-check(PC);
-PC->AddToInventory(NewItem);
+APlayerController* PC = World->GetFirstPlayerController();
+if (!IsValid(PC))
+{
+    // Emit an optional diagnostic only if absence violates this operation's contract.
+    ensureMsgf(false, TEXT("No player controller available for this operation"));
+    return;
+}
+// Perform the intended operation using the real controller/custom interface here.
 ```
 
-### Safe Array Access
-
-> Source: Ben UI, "IsValidIndex before accessing TArray".
+For a player index use `UGameplayStatics::GetPlayerController(WorldContextObject, Index)` with its header/module dependencies. `UWorld::GetPlayerController(int)` is not the inspected API. `APlayerController` has no built-in `AddToInventory`; an inventory example must name its actual custom type/interface.
 
 ```cpp
-// [BAD] Direct indexing; out-of-bounds access crashes
-SomeArray[Index].DoSomething();
-
-// [OK] Validate the index first
-if (SomeArray.IsValidIndex(Index)) {
+// Function-body fragment; no concurrent structural mutation of SomeArray.
+if (SomeArray.IsValidIndex(Index))
+{
     SomeArray[Index].DoSomething();
 }
+else
+{
+    // Return an error or apply the documented out-of-range behavior.
+}
 ```
 
-## Shipping Build Safety
+An index proven valid by a loop or another invariant need not be checked redundantly. Index validity does not validate an element's object lifetime or concurrent access.
 
-- Replace `check/checkf` on runtime input paths with `ensure` plus fallback behavior.
-- Verify that debugging code guarded by `#if !UE_BUILD_SHIPPING` does not contain required side effects.
-- Side effects inside `verify()` execute in Shipping without the assertion.
+## Thread Safety and Shipping Review
 
-**Non-UCLASS system classes:** The original reference points to Epic's non-reflected system classes in `RootMotionSource.h`. Performance-critical code need not incur USTRUCT/UCLASS reflection overhead.
+Default to GameThread access for UObject APIs unless the specific API and version explicitly support the intended worker-thread operation. Lifetime retention/pinning and data synchronization are separate requirements; neither grants permission to call arbitrary UObject methods concurrently. Prefer value snapshots prepared on the GameThread for parallel computation, then apply results on the correct thread.
+
+Check the consuming target's diagnostic configuration and required error paths. Test the relevant Shipping behavior, GC ownership, Tick registration, dedicated-server/PIE cases, and delegate teardown before reporting runtime safety. Non-reflected system classes are legitimate when reflection is not needed; do not add reflection or remove it merely as an unmeasured optimization.

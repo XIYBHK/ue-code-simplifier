@@ -21,6 +21,12 @@ The local source snapshot additionally contained four uncommitted learning entri
 - Added standalone installation/use documentation, provenance, attribution, the standard text for the existing MIT declaration, and explicit validation limitations.
 - Added contextual notes for source inconsistencies without silently changing C++ example bodies.
 
+## Technical Correction (2026-10-09)
+
+The extraction bullets above describe the initial standalone commit. After the user authorized correction and publication, the standalone project revised its technical rules and examples rather than retaining known source errors. All 40 audit IDs are tracked in [AUDIT-RESOLUTION.md](AUDIT-RESOLUTION.md); source/version evidence and test limits are in [VALIDATION.md](VALIDATION.md).
+
+The review purpose, trigger boundaries, eight supporting references, 25 stable rule IDs, original historical dates, MIT declaration and attribution remain. Historical rules/confidence are distinguished from new evidence; affected rules/resolutions have qualification notes. This is a corrected derivative of the source, not a claim that the original files or input hashes changed. No edits were made to the source collection.
+
 ## Original File Hashes
 
 SHA-256 hashes below identify the original local input bytes before translation. Paths are relative to the source skill directory. The learning-record hash includes the four local additions described above.

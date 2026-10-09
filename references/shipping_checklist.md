@@ -1,141 +1,155 @@
 # Shipping and Release Readiness
 
-> Sources cited by the original skill: FAB technical requirements, Epic documentation, and practical experience. Check current submission requirements separately before publishing a plugin.
+Primary sources: [Epic Modules (5.3)](https://dev.epicgames.com/documentation/en-us/unreal-engine/unreal-engine-modules?application_version=5.3), [IWYU](https://dev.epicgames.com/documentation/unreal-engine/include-what-you-use-iwyu-for-unreal-engine-programming), [Fab file/structure requirements](https://dev.epicgames.com/documentation/en-us/fab/asset-file-format-and-structure-requirements-in-fab), and [Fab technical requirements](https://www.fab.com/o/technical-requirements). The original skill also credits Ben UI, imzlp, northstarhana.com, SubsystemBrowserPlugin, Tom Looman, and unreal-engine-cpp-pro. Those are attributions, not installed dependencies.
 
-## FAB/Marketplace Submission Readiness
+## FAB/Marketplace Engineering Preflight
 
-| Check | Requirement in the source checklist |
-|-------|-------------------------------------|
-| Compilation | Zero errors in Editor, Game, and Shipping configurations |
-| External dependencies | Package all dependencies; do not require additional downloads |
-| Platform declaration | Explicit SupportedTargetPlatforms in `.uplugin` |
-| Version | Semantic version, such as 1.0.0 |
-| Demonstration | At least one test Map |
-| Paths | Use `FPaths::` APIs; no hard-coded paths |
-| Third-party code | License compliance |
+This is a **non-exhaustive engineering checklist**, not a certificate of current Fab acceptance. The publicly readable format/structure page has product-type-specific rules. On 2026-10-09, the technical-requirements page's complete body was not available to the audit's text reader. Verify the full current policy and the applicable code-plugin category before submission; do not infer that the seven checks below are all requirements or universally mandatory in exactly this form.
+
+| Area | Review action |
+|------|---------------|
+| Builds | Build the supported targets/configurations/platforms; Runtime and Editor-only modules have different applicable checks |
+| Dependencies | Identify packaged code/libraries, required SDKs/services/setup, distribution permissions, and current policy constraints |
+| Platforms | Align descriptor/module allowlists and claimed support with actual tested platforms; a declaration alone proves nothing |
+| Version | Use valid descriptor fields and clear user-facing version/release notes; do not assert universal semantic-version policy without current evidence |
+| Demonstration | Supply the documentation/examples/maps required for this product type and enough material to demonstrate the advertised functionality |
+| Paths/files | Use portable engine facilities where appropriate; validate paths, packaging, external resource availability, and cleanup |
+| Licensing | Preserve attribution and comply with applicable third-party/engine distribution terms |
+
+For code plugins, also check the current required module/source/config/content layout and any additional official requirements. Do not require a test Map for every possible code-plugin category based solely on this reference. No Fab submission or approval was performed for this skill.
 
 ## Cross-Platform Compilation
 
-**Avoid:**
+Use appropriate abstractions such as `FPaths`, `IFileManager`, and `FPlatformProcess`, but verify their contracts and resource lifetimes. Standard file I/O or platform headers are not inherently forbidden; isolate platform-specific code and follow Unreal's platform-header/type-wrapper guidance for the exact version.
 
 ```cpp
-#include <windows.h>        // [BAD] Platform-specific header
-FString P = TEXT("C:\\.."); // [BAD] Hard-coded path
-std::ifstream File(...);    // [BAD] STL file I/O
+// Preprocessor structure example. Platform-specific implementation goes in each branch.
+#if PLATFORM_WINDOWS
+// Windows implementation with appropriate Unreal platform-header wrappers.
+#elif PLATFORM_LINUX || PLATFORM_MAC
+// Supported Unix-like implementation.
+#else
+// Explicit unsupported-platform behavior, if applicable.
+#endif
 ```
 
-**Use:**
-
-```cpp
-FPlatformProcess::GetDllHandle(...)  // DLL loading
-FPaths::ProjectConfigDir()           // Paths
-IFileManager::Get()                  // File operations
-#if PLATFORM_WINDOWS / PLATFORM_LINUX / PLATFORM_MAC  // Conditional compilation
-```
+Avoid machine-specific paths. Check DLL load failures, appropriate `FreeDllHandle` cleanup, plugin/packaged paths, and non-supported platform behavior. A successful Windows build is not cross-platform validation.
 
 ## Module Loading Phases
 
-> Sources: Epic's `ELoadingPhase::Type`; imzlp's FModuleManager analysis.
+Choose the phase from real dependencies and event timing. `PostEngineInit` is **not required for all Editor modules**: the inspected UE5.6 `AudioInsightsEditor` is Type Editor with LoadingPhase Default. Other engine Editor modules also use earlier phases.
 
-| Phase | Timing | Use |
-|-------|--------|-----|
-| `PostConfigInit` | After configuration initialization | Core Runtime modules, earliest stage |
-| `PreDefault` | Before default loading | Initialization before most modules |
-| `Default` | Default | Ordinary Runtime modules |
-| `PostDefault` | After default loading | Runtime modules depending on other modules |
-| `PostEngineInit` | After full engine initialization | **Required for Editor modules by the original rule** |
+| Phase | Useful boundary |
+|-------|-----------------|
+| `EarliestPossible` | Very early facilities needed as plugin files become discoverable |
+| `PostConfigInit` | Immediately after configuration initialization, for relevant low-level hooks |
+| `PreDefault` | Work that must precede default module loading |
+| `Default` | Ordinary default loading; legal for suitable Runtime and Editor modules |
+| `PostDefault` | Work after default-phase loading |
+| `PostEngineInit` | Work that specifically needs completed engine initialization |
 
-- [BAD] Editor modules using `Default`: use `PostEngineInit` under this rule.
-- Match `.uplugin` LoadingPhase to the module's purpose.
+The table is not the full enum. Later loading can miss registration events, including relevant node/menu setup. Delay only the work requiring a later state, or use the appropriate callback; do not mechanically delay an entire Editor module. See `Source/Runtime/Projects/Public/ModuleDescriptor.h` and [validation evidence](../VALIDATION.md).
 
 ## Module Architecture
 
-| Directory | Contents |
-|-----------|----------|
-| `Public/` | Interface headers visible to other modules |
-| `Private/` | Implementations and internal headers |
+Public headers expose an interface to downstream modules. Private headers and source files implement internal details. [Epic's module dependency guidance](https://dev.epicgames.com/documentation/en-us/unreal-engine/unreal-engine-modules?application_version=5.3) selects public/private dependencies according to exposure.
 
 ```csharp
-PublicDependencyModuleNames  // Modules included by public headers
-PrivateDependencyModuleNames // Modules used only in .cpp files
+// Build.cs fragments, with actual module names chosen from the code's needs.
+PublicDependencyModuleNames.Add("Core"); // If the public interface requires it.
+PrivateDependencyModuleNames.Add("Projects"); // If used only by private implementation.
 ```
 
-**Runtime modules must not depend on Editor modules.** Guard editor-only code with `#if WITH_EDITOR`.
+A compatibility layer is not a reason to make all its dependencies public. An `if (Target.bBuildEditor)` block is not a reason to make all contained dependencies private: a public Editor interface can require public dependencies. Avoid unconditionally exposing Editor dependencies from shipping Runtime modules; put editor interfaces in an appropriate Editor/UncookedOnly module where possible. `#if WITH_EDITOR` guards alone do not configure dependency visibility, module type, or target eligibility.
 
-## Hot Reload / Live Coding Traps
+## Hot Reload, Live Coding, and Reinstancing
 
-> Sources: northstarhana.com; SubsystemBrowserPlugin issue #14.
+These are distinct mechanisms. Do not assume every reload recreates every subsystem, or that every static pointer always becomes dangling. Structural class changes, object replacement, module unload, World cleanup, and shutdown have different lifetime effects.
 
-- **Subsystems are recreated during Hot Reload:** Do not cache Subsystem pointers elsewhere.
-- **Engine pointers in static/global variables:** They become dangling after Hot Reload.
-- **Class reinstancing can orphan instances:** Listen to `FWorldDelegates::OnWorldCleanup`.
-- **IDetailCustomization needs refreshing:** Call `NotifyCustomizationModuleChanged()` after Hot Reload.
+- Match caches and delegates to the actual owner. Use safe references/re-resolution and invalidate them on the relevant event.
+- `FWorldDelegates::OnWorldCleanup` concerns World cleanup; it does not cover every object reinstancing case. The inspected engine also exposes `FCoreUObjectDelegates::OnObjectsReinstanced` with a replacement map.
+- Clear module-owned static state and unregister bindings when their owners unload or shut down.
+- `NotifyCustomizationModuleChanged()` is available for refreshing relevant PropertyEditor customization state; arrange proper registration/unregistration.
+
+These API distinctions were inspected in source; no Hot Reload/Live Coding experiment was run. Reproduce the intended reload scenario before claiming a cache is safe or broken.
 
 <a id="softref"></a>
-## Soft References Avoid Loading Chains
-
-> Sources: unreal-engine-cpp-pro skill; Tom Looman's Cast section. These are source attributions, not required skill dependencies.
+## Soft References and Asset Availability
 
 ```cpp
-// [BAD] Hard reference: loading this Blueprint loads all referenced assets
-UPROPERTY(EditDefaultsOnly)
-TSubclassOf<AWeapon> WeaponClass;
-
-// [OK] Soft reference: load on demand
-UPROPERTY(EditDefaultsOnly)
+// Reflected member: an Actor class path, not an Actor instance.
+UPROPERTY(EditDefaultsOnly, Category = "MyPlugin|Assets")
 TSoftClassPtr<AWeapon> WeaponClass;
 ```
 
-- [BAD] Hard UPROPERTY references to large assets: use `TSoftObjectPtr<T>`.
-- [BAD] TSubclassOf referencing complex Blueprint classes: use `TSoftClassPtr<T>`.
+Use `TSoftClassPtr` for classes and `TSoftObjectPtr` for object assets/instances of the appropriate type. Soft references can avoid a direct hard loading dependency but do not provide strong GC ownership of a loaded object. Establish when/how to load, failure handling, retention/streamable-handle lifetime, and unload behavior. Confirm the cooking/asset-discovery strategy in packaged builds.
+
+A hard reference may be correct when immediate availability is part of the contract. Inspect the real reference graph and budget before changing it: other hard references and load operations can preserve the chain. Do not universally replace complex Blueprint or large-asset references.
 
 <a id="include"></a>
-## Include Order
-
-> Source: Ben UI, 2024 Coding Standards.
+## Include Roles and Order
 
 ```cpp
-// [OK] Alphabetical ordering to reduce merge conflicts
-#include "MyClass.h"
+// MyActor.h: include declarations actually used by this reflected header.
+#include "CoreMinimal.h"
+#include "GameFramework/Actor.h"
+#include "MyActor.generated.h" // Last include in the reflected header.
+```
+
+```cpp
+// MyActor.cpp: its matching header first. No generated include here.
+#include "MyActor.h"
 #include "Components/HealthComponent.h"
-#include "GameFramework/Character.h"
-#include "MyClass.generated.h" // Always last
 ```
 
-## Particle System Selection
+Order other includes consistently if their semantics permit it. Do not confuse the aggregate `Engine.h` with the specific `Engine/Engine.h` that declares UEngine/GEngine. Keep code valid in non-Unity builds rather than relying on another translation unit's includes.
 
-The source recommends Niagara (`UNiagaraComponent`) over Cascade (`UParticleSystemComponent`) for new UE5 Marketplace plugin submissions.
+## Particle System Integration
 
-```cpp
-// [BAD] Deprecated Cascade particle system in the source notes
-UPROPERTY()
-TObjectPtr<UParticleSystemComponent> RainEffect;
-
-// [OK] Niagara, recommended for UE5
-UPROPERTY()
-TObjectPtr<UNiagaraComponent> RainEffect;
-```
-
-- The source notes that Cascade alone does not cause Marketplace rejection, but recommends Niagara as best practice.
-- To support older projects, offer both Cascade and Niagara implementations.
-- Niagara requires the `"Niagara"` module dependency in Build.cs.
+Niagara is generally a suitable choice for new UE5 VFX integrations; include its actual component header and declare the Niagara module/plugin dependency as required. Cascade integration is not automatically an invalid API or a proven Fab rejection. Preserve legacy product compatibility where needed and verify the target engine and current product policy before replacing a working implementation.
 
 ## Serialization and Versioning
 
-```cpp
-enum class EMyPluginVersion : int32 {
-    Initial = 0,
-    AddedNewField = 1,
-    LatestPlusOne,
-    Latest = LatestPlusOne - 1
-};
+Register a stable format GUID/current version, request its use in the archive, and handle absent/old versions explicitly. `CustomVer` returns -1 when a tag is absent. `UsingCustomVersion` requires prior registration and does not add a version during loading.
 
-void Serialize(FArchive& Ar) {
-    Ar.UsingCustomVersion(MyPluginGUID);
-    const int32 Ver = Ar.CustomVer(MyPluginGUID);
-    Ar << BaseData;
-    if (Ver >= (int32)EMyPluginVersion::AddedNewField) {
-        Ar << NewField;
-    }
+```cpp
+// Source-file illustration. Include Serialization/Archive.h,
+// Serialization/CustomVersion.h, and Misc/Guid.h.
+// Generate a distinct GUID once for the real format; never change it for each release.
+namespace MyPluginVersion
+{
+    const FGuid GUID(0x71A07B36, 0xB3464B19, 0xAE224013, 0x98712DAD);
+    enum Type : int32 { Initial = 0, AddedNewField = 1, Latest = AddedNewField };
+    static FCustomVersionRegistration Registration(GUID, Latest, TEXT("MyPluginData"));
 }
+
+// Ordinary struct, serialized within a format/archive that persists custom versions.
+// This is not a complete standalone raw-memory file format.
+struct FMyData
+{
+    int32 BaseData = 0;
+    int32 NewField = 0;
+
+    void Serialize(FArchive& Ar)
+    {
+        Ar.UsingCustomVersion(MyPluginVersion::GUID);
+        const int32 Version = Ar.CustomVer(MyPluginVersion::GUID);
+        if (Version > MyPluginVersion::Latest)
+        {
+            Ar.SetError(); // This example does not understand future layouts.
+            return;
+        }
+        Ar << BaseData;
+        if (Version >= MyPluginVersion::AddedNewField)
+        {
+            Ar << NewField;
+        }
+        else if (Ar.IsLoading())
+        {
+            NewField = 0; // Defined migration/default for this example's old layout.
+        }
+    }
+};
 ```
+
+If overriding UObject `Serialize`, use the actual override signature and call the appropriate `Super::Serialize`; that instruction does not apply to this ordinary struct. Ensure the surrounding file/archive persists and restores its custom-version container; raw byte archives do not automatically form a versioned file. Test current round trips, old/absent versions, future-version rejection, initialization, error paths, and data migration. This repository has not run those UE serialization tests.

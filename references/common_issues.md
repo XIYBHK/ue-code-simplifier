@@ -1,438 +1,219 @@
 # Common Issues and Solutions
 
-These examples are translated from the source skill, including its original illustrative API calls. They are not independently compiled examples. See [the validation limits](../README.md#version-scope-and-validation-limits) before copying code into a plugin.
+These are contextual review examples, not a collection of independent compile-ready plugins. Paired bad/good fragments are alternatives. A deliberately bad example is a diagnostic demonstration, not recommended code. Actual UHT, module, linker, target, and runtime checks are still required; see [VALIDATION.md](../VALIDATION.md).
 
 ## Contents
 
-- [Compilation warnings](#compilation-warnings): C5038 initialization order, C2440 conversions.
-- [Header issues](#header-issues): complete types for TUniquePtr, .generated.h order.
-- [Reflection](#reflection): UFUNCTION callbacks, GENERATED_BODY placement.
-- [Performance](#performance): expensive Tick work, unnecessary allocations.
-- [Thread safety](#thread-safety): nested locking.
-- [Memory leaks](#memory-leaks): circular UObject references, non-UObject memory.
-- [Blueprint issues](#blueprint-issues): incomplete metadata, Category format.
-- [TArray type incompatibility](#tarray-type-incompatibility): TInlineAllocator, SetNumZeroed, member shadowing.
-- [Spatial data structures](#spatial-data-structures): TMap and spatial grids.
-- [Debugging](#debugging): conditional compilation, tracing.
+- [Compilation warnings](#compilation-warnings)
+- [Header issues](#header-issues)
+- [Reflection and delegates](#reflection-and-delegates)
+- [Performance](#performance)
+- [Thread safety](#thread-safety)
+- [Ownership and leaks](#ownership-and-leaks)
+- [Blueprint metadata](#blueprint-metadata)
+- [Array types and initialization](#array-types-and-initialization)
+- [Spatial data structures](#spatial-data-structures)
+- [Debugging and tracing](#debugging-and-tracing)
 
 ## Compilation Warnings
 
-### C5038: Initializer List Order
+### Initialization Order
+
+Members initialize in declaration order, not initializer-list order. The original negative example had matching orders and was wrong. A genuine mismatch is illustrated below; warning number/enablement depends on the compiler.
 
 ```cpp
-// Incorrect: initialization order differs from declaration order
-class FMyStruct
+// Intentionally mismatched order: A is declared before B, but listed after it.
+struct FBadInitializer
 {
-    int32 B;
     int32 A;
-
-    FMyStruct()
-        : B(1)  // C5038 warning in the original example
-        , A(2)
-    {}
-};
-
-// Correct: initialize in declaration order
-class FMyStruct
-{
-    int32 A;  // Declared first
-    int32 B;  // Declared second
-
-    FMyStruct()
-        : A(2)  // Initialized first
-        , B(1)  // Initialized second
-    {}
+    int32 B;
+    FBadInitializer() : B(1), A(2) {}
 };
 ```
-
-### C2440: Type Conversion
 
 ```cpp
-// Incorrect: direct TSubclassOf conversion
-TSubclassOf<AActor> ActorClass;
-TSoftObjectPtr<AActor> SoftPtr = ActorClass;  // C2440
-
-// Correct according to the source example: obtain UClass* with Get()
-TSubclassOf<AActor> ActorClass;
-TSoftObjectPtr<AActor> SoftPtr = ActorClass.Get();
+// Correct list for the same declaration order.
+struct FOrderedInitializer
+{
+    int32 A;
+    int32 B;
+    FOrderedInitializer() : A(2), B(1) {}
+};
 ```
+
+Match the initializer list to the required declaration order; do not reorder members just to silence a warning without checking initialization dependencies and ABI/layout.
+
+### Class versus Object Soft References
+
+```cpp
+// Function-body fragment: ActualActorClass is a valid, compatible UClass*.
+TSubclassOf<AActor> ActorClass = ActualActorClass;
+TSoftClassPtr<AActor> SoftClass(ActorClass.Get());
+```
+
+An Actor class (`UClass*`) is not an Actor instance. `TSoftObjectPtr<AActor>` must not be used as the class-reference destination. Some older soft-object constructors accept incompatible types and may compile while yielding unusable results; inspected newer headers deprecate such conversions. Use the correct type instead of assuming `.Get()` repairs all conversions. Validate unset/invalid classes and loading behavior separately. See [source evidence](../VALIDATION.md#api-and-behavior-evidence).
 
 ## Header Issues
 
-### TUniquePtr Requires a Complete Definition
+### TUniquePtr and Incomplete Types
 
 ```cpp
-// Incorrect: forward declaration only
-class FMyData;
-class FMyClass
+// MyOwner.h: ordinary class declarations, with the appropriate UniquePtr header.
+class FPrivateData;
+class FMyOwner
 {
-    TUniquePtr<FMyData> Data;  // Error: destructor needs the complete definition
-};
-
-// Correct: include the full header
-#include "MyData.h"
-class FMyClass
-{
-    TUniquePtr<FMyData> Data;  // Correct
-};
-
-// TSharedPtr permits a forward declaration
-class FMyOtherData;
-class FMyOtherClass
-{
-    TSharedPtr<FMyOtherData> Data;  // Correct: forward declaration is sufficient
+public:
+    FMyOwner();
+    ~FMyOwner();
+private:
+    TUniquePtr<FPrivateData> Data;
 };
 ```
 
-### .generated.h Include Order
-
 ```cpp
-// Incorrect: .generated.h is not last
-#include "MyActor.h"
-#include "MyActor.generated.h"
-#include "OtherHeader.h"  // Incorrect
-
-// Correct: .generated.h must be last
-#include "MyActor.h"
-#include "OtherHeader.h"
-#include "MyActor.generated.h"  // Correct
+// MyOwner.cpp: complete type available before the relevant definitions.
+#include "MyOwner.h"
+#include "PrivateData.h"
+FMyOwner::FMyOwner() = default;
+FMyOwner::~FMyOwner() = default;
 ```
 
-## Reflection
+The default deletion operation requires completeness where instantiated; the member declaration alone does not always require the full header. Other inline operations or custom deleters may change the requirement. `TSharedPtr` can also hold a forward-declared type, but creation and actual member access still need the relevant definition.
 
-### UFUNCTION Is Unnecessary for Non-Dynamic Delegate Callbacks
+### Generated Includes
 
 ```cpp
-// Incorrect: callback bound with AddLambda is marked UFUNCTION
-UFUNCTION()
-void MyCallback();
-
-MyDelegate.AddLambda(this, &UMyClass::MyCallback);
-
-// Correct according to the source example: remove UFUNCTION
-void MyCallback();
-
-MyDelegate.AddLambda(this, &UMyClass::MyCallback);
-
-// Or use a dynamic delegate, which requires UFUNCTION
-DECLARE_DYNAMIC_DELEGATE_OneParam(FMyDelegate, int32, Value);
-
-UFUNCTION()
-void MyDynamicCallback(int32 Value);
-
-MyDynamicDelegate.BindDynamic(this, &UMyClass::MyDynamicCallback);
+// A reflected MyActor.h: do not include itself.
+#include "CoreMinimal.h"
+#include "GameFramework/Actor.h"
+#include "MyActor.generated.h" // Last include.
 ```
 
-### GENERATED_BODY() Placement
+In MyActor.cpp include MyActor.h first, without a separate generated include. Other includes must be self-sufficient for non-Unity builds. `Engine/Engine.h` can be the correct specific header for UEngine/GEngine; avoid the aggregate Engine.h when it is unnecessary.
+
+## Reflection and Delegates
+
+### Native Member Binding
 
 ```cpp
-// Incorrect: GENERATED_BODY() is not the first line
+// UObject method-body fragment; callback signature matches the native delegate.
+FDelegateHandle Handle = MyDelegate.AddUObject(this, &UMyClass::MyCallback);
+// Retain/remove Handle according to the actual lifetime.
+```
+
+`AddLambda(this, &Class::Method)` is not a member-binding API. Supply a callable lambda to AddLambda or use AddUObject/another appropriate binding. Native binding does not need UFUNCTION by itself; preserve any other Blueprint/RPC/reflection use of the function. Dynamic bindings use the matching dynamic declaration plus UFUNCTION and can be needed for serialization/reflection as well as Blueprint. See [delegate patterns](api_patterns.md#delegate).
+
+### GENERATED_BODY
+
+```cpp
+// Reflected header class fragment; its generated header must already be included.
 UCLASS()
 class AMyActor : public AActor
 {
-    // Other code
-    GENERATED_BODY()  // Incorrect
-};
-
-// Correct: GENERATED_BODY() must be first
-UCLASS()
-class AMyActor : public AActor
-{
-    GENERATED_BODY()  // Correct
-
-    // Other code
+    // Comments before the macro do not change its syntax or position.
+    GENERATED_BODY()
+public:
+    void PerformWork();
 };
 ```
+
+Place the generated-body macro at the expected beginning of a reflected declaration and use the appropriate UCLASS/USTRUCT/interface form. A comment before it is not an invalid statement. Do not invent a UHT failure from a pair of examples that differ only in comments.
 
 ## Performance
 
-### Expensive Work in Tick
+Measure before changing scheduling, data structures, or ownership. Reducing update frequency can change latency, integration, and call counts. Cache only with a clear invalidation/lifetime policy. Removing independent temporary arrays and accumulating their contents into one array is not necessarily equivalent.
 
-```cpp
-// Incorrect: expensive work every frame
-void AMyActor::Tick(float DeltaTime)
-{
-    Super::Tick(DeltaTime);
-
-    for (int32 i = 0; i < 10000; ++i)
-    {
-        ExpensiveCalculation();  // Every frame!
-    }
-}
-
-// Correct: interval-based updates
-void AMyActor::Tick(float DeltaTime)
-{
-    Super::Tick(DeltaTime);
-
-    if (GetWorld()->GetTimeSeconds() - LastUpdateTime < 0.1f)
-    {
-        return;  // Skip
-    }
-
-    LastUpdateTime = GetWorld()->GetTimeSeconds();
-    for (int32 i = 0; i < 10000; ++i)
-    {
-        ExpensiveCalculation();
-    }
-}
-```
-
-### Unnecessary Allocations
-
-```cpp
-// Incorrect: repeated allocation inside the loop
-for (int32 i = 0; i < 1000; ++i)
-{
-    TArray<FString> TempArray;  // Allocates each iteration
-    TempArray.Add(Item);
-}
-
-// Correct: allocate in advance
-TArray<FString> TempArray;
-TempArray.Reserve(1000);  // Preallocate
-for (int32 i = 0; i < 1000; ++i)
-{
-    TempArray.Add(Item);
-}
-```
+For scratch reuse, choose the correct reset boundary and preserve required outputs. Shared buffers need exclusive access or safe partitioning; see [hot paths](performance_patterns.md#hotpath) and [ParallelFor](performance_patterns.md#parallelfor).
 
 ## Thread Safety
 
-### Nested Locking
-
 ```cpp
-// Incorrect: nested locks can deadlock
+// Source-file illustration. Include HAL/CriticalSection.h and Misc/ScopeRWLock.h.
 FRWLock Lock1;
 FRWLock Lock2;
 
-void Thread1()
+void FirstOperation()
 {
-    Lock1.WriteLock();
-    Lock2.WriteLock();  // May deadlock
-    // ...
-    Lock2.WriteUnlock();
-    Lock1.WriteUnlock();
+    FWriteScopeLock First(Lock1);
+    FWriteScopeLock Second(Lock2);
+    // Work while holding both locks.
 }
 
-void Thread2()
+void SecondOperation()
 {
-    Lock2.WriteLock();
-    Lock1.WriteLock();  // May deadlock
-    // ...
-    Lock1.WriteUnlock();
-    Lock2.WriteUnlock();
-}
-
-// Correct: consistent lock ordering
-void Thread1()
-{
-    Lock1.WriteLock();
-    Lock2.WriteLock();
-    // ...
-    Lock2.WriteUnlock();
-    Lock1.WriteUnlock();
-}
-
-void Thread2()
-{
-    Lock1.WriteLock();  // Same order
-    Lock2.WriteLock();
-    // ...
-    Lock2.WriteUnlock();
-    Lock1.WriteUnlock();
+    FWriteScopeLock First(Lock1);  // Same global order.
+    FWriteScopeLock Second(Lock2);
+    // Work while holding both locks.
 }
 ```
 
-## Memory Leaks
+Consistent acquisition order prevents the illustrated opposite-order ABBA problem; scoped locks also release on normal scope exits. It is not proof of freedom from every deadlock or race. Check callbacks, reentrancy, lock hierarchy, and GameThread dependencies; do not hold an inappropriate lock while invoking external callbacks.
 
-### Circular UObject References
+## Ownership and Leaks
 
-```cpp
-// Incorrect under the source's rule: circular raw-pointer UObject references
-UCLASS()
-class AActorA : public AActor
-{
-    UPROPERTY()
-    AActorB* RefB;  // Strong reference
-};
-
-UCLASS()
-class AActorB : public AActor
-{
-    UPROPERTY()
-    AActorA* RefA;  // Strong reference: cycle
-};
-
-// Correct under the source's rule: one weak reference
-UCLASS()
-class AActorB : public AActor
-{
-    UPROPERTY()
-    TWeakObjectPtr<AActorA> RefA;  // Weak reference breaks the cycle
-};
-```
-
-### Non-UObject Memory Management
+UObject references use tracing GC. An unreachable strong-reference cycle can be collected. Diagnose roots/external referencers before changing ownership, and check the actual Actor/World destruction lifecycle. TSharedPtr reference-counting cycles have a different mechanism and may need TWeakPtr edges. See [GC safety](safety_patterns.md#gc).
 
 ```cpp
-// Incorrect: new without a matching delete
-class FMyData
-{
-    static FMyData* Create()
-    {
-        return new FMyData();  // No matching delete
-    }
-};
-
-// Correct: smart pointer ownership
-class FMyData
-{
-    static TSharedPtr<FMyData> Create()
-    {
-        return MakeShared<FMyData>();  // Automatic management
-    }
-};
+// Ordinary non-UObject allocation with explicit RAII ownership.
+TUniquePtr<FMyData> Data = MakeUnique<FMyData>();
 ```
 
-## Blueprint Issues
+A naked new is not automatically proof of a leak if ownership is properly transferred and deletion occurs elsewhere. Prefer clear RAII ownership, and verify the caller contract. Do not use these non-UObject ownership tools to ordinary-delete UObjects.
 
-### Incomplete Metadata
-
-The source uses Chinese display metadata. The demonstration labels below are translated into English while retaining the metadata fields and structure.
+## Blueprint Metadata
 
 ```cpp
-// Incorrect: missing localized metadata
-UFUNCTION(BlueprintCallable)
-static void MyFunction(FString Data);
-
-// Correct: complete display metadata
-UFUNCTION(BlueprintCallable, Category = "MyPlugin|MyModule",
-    meta = (
-        DisplayName = "My Function",
-        Keywords = "keyword",
-        ToolTip = "Detailed function description\nParameters:\nData - Data description"
-    ))
-static void MyFunction(
-    UPARAM(DisplayName="Data") const FString& Data);
+// Declaration in an appropriate reflected class; define the function separately.
+UFUNCTION(BlueprintCallable, Category = "MyPlugin|Utilities",
+    meta = (DisplayName = "Process Data", ToolTip = "Process the supplied data.",
+            Keywords = "process,data", AdvancedDisplay = "Extra"))
+static void ProcessData(UPARAM(DisplayName = "Data") const FString& Data, int32 Extra = 0);
 ```
 
-### Inconsistent Category Format
+Category depth and naming are team conventions, not a mandatory three-segment grammar. Some Engine-module Blueprint APIs require an explicit category; apply UHT's actual context. Display strings and comments are not proof of completed localization. Optional metadata must reference real parameters and preserve existing Blueprint interfaces. See [metadata](api_patterns.md#uproperty).
+
+## Array Types and Initialization
 
 ```cpp
-// Incorrect: inconsistent formats
-UFUNCTION(BlueprintCallable, Category = "MyFunction")  // Missing module prefix
-UFUNCTION(BlueprintCallable, Category = "MyPlugin|MyFunction")  // Missing subcategory
-
-// Correct: consistent format
-UFUNCTION(BlueprintCallable, Category = "MyPlugin|MyModule|Subcategory")
+// Alternative declarations, not two overloads with interchangeable reference types.
+template<typename AllocatorType>
+void QuerySphere(TArray<int32, AllocatorType>& OutResult);
 ```
 
-## TArray Type Incompatibility
+TArray allocator specializations are distinct types; a default mutable TArray reference cannot bind to a TInlineAllocator specialization. Alternatively use a suitable view for a non-resizing operation or keep the default allocator and reserve capacity.
 
-### TInlineAllocator and the Default Allocator Are Not Interchangeable
-
-```cpp
-// [BAD] Compilation error: incompatible types
-TArray<int32, TInlineAllocator<64>> LocalBuffer;
-void QuerySphere(TArray<int32>& OutResult);  // Default allocator
-QuerySphere(LocalBuffer);  // C2664: cannot convert
-
-// [OK] Option 1: default TArray with Reserve
-TArray<int32> LocalBuffer;
-LocalBuffer.Reserve(64);
-QuerySphere(LocalBuffer);
-
-// [OK] Option 2: template the downstream function
-template<typename AllocType>
-void QuerySphere(TArray<int32, AllocType>& OutResult);
-```
-
-### SetNumZeroed Versus SetNumUninitialized + Memzero
-
-```cpp
-// SetNumZeroed zeros only newly added elements, not existing elements when shrinking
-// For a reused array that must be fully zeroed every frame:
-Array.SetNumUninitialized(N);
-FMemory::Memzero(Array.GetData(), N * sizeof(T));
-
-// Or Reset + SetNumZeroed when the previous size is uncertain
-Array.Reset();
-Array.SetNumZeroed(N);
-```
-
-### Shadowing a Member Array
-
-```cpp
-// [BAD] Local variable shadows a member: C4458
-class FSystem {
-    TArray<float> CorrectionSums;  // Member
-
-    void SolveObstacles() {
-        TArray<float> CorrectionSums;  // [BAD] Shadows the member!
-    }
-};
-
-// [OK] Use a different local name
-void SolveObstacles() {
-    TArray<float> ObstacleCorrectionSums;  // [OK] No shadowing
-}
-```
+`SetNumZeroed` only zero-initializes newly added elements. Use a type-safe reset for the entire reused range; byte-clearing arbitrary nontrivial elements is unsafe. Capacity/shrinking, bounds, and thread ownership still matter. Avoid accidental local variables shadowing persistent members, but interpret warning severity in the actual compiler/configuration.
 
 ## Spatial Data Structures
 
-### TMap and Spatial Grids
-
-The source discourages a plain FIntVector TMap spatial grid and demonstrates a custom spatial hash key below. This example still uses TMap; preserve that distinction when applying the rule.
-
 ```cpp
-// [BAD] The original comment says Epic never uses TMap for spatial grids
+// Valid candidate for a sparse grid; benchmark its key distribution and access pattern.
 TMap<FIntVector, TArray<int32>> GridCells;
-
-// [OK] Custom spatial hash key
-struct FCellKey {
-    FIntVector Coord;
-    explicit FCellKey(const FIntVector& C) : Coord(C) {}
-    bool operator==(const FCellKey& O) const { return Coord == O.Coord; }
-    friend uint32 GetTypeHash(const FCellKey& K) {
-        return uint32(K.Coord.X) * 1150168907u
-             + uint32(K.Coord.Y) * 1235029793u
-             + uint32(K.Coord.Z) * 1282581571u;
-    }
-};
-TMap<FCellKey, TArray<int32>> GridCells;
 ```
 
-## Debugging
+Epic uses TMap in spatial data structures. A custom hash can still be used with TMap; it is not a different container. Include multilevel identity in keys where required and measure collisions/memory/query costs before replacing a valid structure. See [container selection](performance_patterns.md#container).
 
-The Stats system (`stat game`) differs from Insights tracing (`TRACE_CPUPROFILER_EVENT_SCOPE`). See [performance_patterns.md](performance_patterns.md#stats).
-
-### Conditional Debug Code
+## Debugging and Tracing
 
 ```cpp
-// Debug builds only
+// Function-body fragment: optional diagnostic only.
 #if UE_BUILD_DEBUG
-    UE_LOG(LogTemp, Warning, TEXT("Debug: Value = %d"), MyValue);
-#endif
-
-// Development builds only
-#if !UE_BUILD_SHIPPING
-    verify(MyCondition);  // Compiled out in Shipping because of this guard
+UE_LOG(LogMyPlugin, Verbose, TEXT("Diagnostic value: %d"), Value);
 #endif
 ```
 
-### Performance Tracing
+`!UE_BUILD_SHIPPING` includes multiple non-Shipping configurations, not only Development. A required operation, even one inside verify, disappears if its entire preprocessor branch is excluded.
 
 ```cpp
-// CPU Profiler tracing
-TRACE_CPUPROFILER_EVENT_SCOPE(MyFunction);
-
-void MyFunction()
+// Function-body fragment: separate scopes give separate measured sections.
 {
     TRACE_CPUPROFILER_EVENT_SCOPE(Section1);
-    // Code 1
-
+    // First work section.
+}
+{
     TRACE_CPUPROFILER_EVENT_SCOPE(Section2);
-    // Code 2
+    // Second work section.
 }
 ```
+
+Scope instrumentation belongs inside the function/lexical scope being measured. Consecutive scope declarations in the same block remain active until block exit and are nested, not sequential section timers. Stats and CPU traces can be bridged by configuration; see [profiling](performance_patterns.md#stats).
